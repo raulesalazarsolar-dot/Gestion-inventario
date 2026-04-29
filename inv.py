@@ -14,14 +14,14 @@ from office365.runtime.auth.user_credential import UserCredential
 # 1. CONFIGURACIÓN
 # ==========================================
 SITE_URL = "https://teams.wal-mart.com/sites/MejoradedesempeoprocesosclaveP5-Carnes"
-
-# Rutas relativas en SharePoint
 EXCEL_URL = "/sites/MejoradedesempeoprocesosclaveP5-Carnes/Documentos compartidos/Asset Strategy/Levantamiento Repuestos Mantenimiento/Levantamiento de Repuestos Bodega Mantenimiento/Gestión de Inventario (solo datos) y ficha.xlsm"
 FOTOS_FOLDER_URL = "/sites/MejoradedesempeoprocesosclaveP5-Carnes/Documentos compartidos/Asset Strategy/Levantamiento Repuestos Mantenimiento/Levantamiento de Repuestos Bodega Mantenimiento/Fotos Repuestos"
 
-# Usando tus credenciales que ya sabemos que funcionan
-USERNAME = os.environ.get("SP_USERNAME", "r0r0noi@cl.wal-mart.com")
-PASSWORD = os.environ.get("SP_PASSWORD", "fiXed.sPout+8")
+USERNAME = os.environ.get("SP_USERNAME")
+PASSWORD = os.environ.get("SP_PASSWORD")
+
+if not USERNAME or not PASSWORD:
+    raise ValueError("❌ Faltan las credenciales. Configura SP_USERNAME y SP_PASSWORD en GitHub Secrets.")
 
 OUTPUT_HTML = "index.html"
 
@@ -33,7 +33,15 @@ def obtener_mapa_fotos(ctx, folder_url):
     try:
         folder = ctx.web.get_folder_by_server_relative_url(folder_url)
         files = folder.files.get().execute_query()
-        return {os.path.splitext(f.name)[0]: f.serverRelativeUrl for f in files}
+        
+        mapa = {}
+        for f in files:
+            # Extrae el nombre sin extensión, quita espacios y lo pasa a minúscula
+            nombre_base = str(os.path.splitext(f.name)[0]).strip().lower()
+            mapa[nombre_base] = f.serverRelativeUrl
+            
+        print(f"✅ Se encontraron {len(mapa)} fotos válidas en la carpeta de SharePoint.")
+        return mapa
     except Exception as e:
         print(f"⚠️ Error al mapear fotos: {e}")
         return {}
@@ -73,19 +81,26 @@ def main():
         df = pd.read_excel(response, sheet_name="Gestión Inventario")
         df = df.fillna("") 
         
-        print(f"✅ Se leyeron {len(df)} registros. Procesando datos y fotos...")
+        print(f"✅ Se leyeron {len(df)} registros. Procesando datos y haciendo match con fotos...")
         
         db_json = {}
+        fotos_descargadas = 0
+
         for index, row in df.iterrows():
             cod_interno = str(row.get('Código\n interno \nproyecto', '')).strip()
             if not cod_interno or cod_interno == "nan": continue 
             
-            cod_foto = str(row.get('Código Fotografía asociada', '')).strip()
+            # --- LIMPIEZA EXTREMA DEL CÓDIGO DE LA FOTO ---
+            val_foto = str(row.get('Código Fotografía asociada', '')).strip().lower()
+            # Si alguien le puso ".jpg" en el excel, se lo quitamos para que haga match
+            cod_foto = os.path.splitext(val_foto)[0] if val_foto != "nan" else ""
+            
             img_b64 = None
             
             if cod_foto and cod_foto in mapa_fotos:
-                print(f"   ... Descargando foto {cod_foto}", end='\r')
+                print(f"   ... Descargando foto para: {cod_foto}", end='\r')
                 img_b64 = descargar_y_comprimir_foto(ctx, mapa_fotos[cod_foto])
+                if img_b64: fotos_descargadas += 1
             
             db_json[cod_interno] = {
                 "codigo_interno": cod_interno,
@@ -104,7 +119,7 @@ def main():
                 "img_base64": img_b64
             }
             
-        print("\n✅ Procesamiento finalizado. Construyendo HTML...")
+        print(f"\n✅ Procesamiento finalizado. Se descargaron exitosamente {fotos_descargadas} fotos.")
         generar_html_inventario(db_json)
 
     except Exception as e: 
