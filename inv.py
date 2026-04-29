@@ -14,35 +14,40 @@ from office365.runtime.auth.user_credential import UserCredential
 # 1. CONFIGURACIÓN (CON CREDENCIALES)
 # ==========================================
 SITE_URL = "https://teams.wal-mart.com/sites/MejoradedesempeoprocesosclaveP5-Carnes"
-EXCEL_URL = "/sites/MejoradedesempeoprocesosclaveP5-Carnes/Documentos compartidos/Asset Strategy/Levantamiento Repuestos Mantenimiento/Levantamiento de Repuestos Bodega Mantenimiento/Gestión de Inventario (solo datos) y ficha.xlsm"
-FOTOS_FOLDER_URL = "/sites/MejoradedesempeoprocesosclaveP5-Carnes/Documentos compartidos/Asset Strategy/Levantamiento Repuestos Mantenimiento/Levantamiento de Repuestos Bodega Mantenimiento/Fotos Repuestos"
 
-# Credenciales directas
+# Rutas de búsqueda
+RUTA_ES = "/sites/MejoradedesempeoprocesosclaveP5-Carnes/Documentos compartidos/Asset Strategy/Levantamiento Repuestos Mantenimiento/Levantamiento de Repuestos Bodega Mantenimiento/Fotos Repuestos"
+RUTA_EN = "/sites/MejoradedesempeoprocesosclaveP5-Carnes/Shared Documents/Asset Strategy/Levantamiento Repuestos Mantenimiento/Levantamiento de Repuestos Bodega Mantenimiento/Fotos Repuestos"
+EXCEL_URL = "/sites/MejoradedesempeoprocesosclaveP5-Carnes/Documentos compartidos/Asset Strategy/Levantamiento Repuestos Mantenimiento/Levantamiento de Repuestos Bodega Mantenimiento/Gestión de Inventario (solo datos) y ficha.xlsm"
+
 USERNAME = "r0r0noi@cl.wal-mart.com"
 PASSWORD = "fiXed.sPout+8"
 
 OUTPUT_HTML = "index.html"
 
 # ==========================================
-# 2. FUNCIONES DE IMÁGENES (MATCH INTELIGENTE)
+# 2. FUNCIONES DE IMÁGENES
 # ==========================================
-def obtener_mapa_fotos(ctx, folder_url):
-    print("📸 Mapeando carpeta de fotos en SharePoint...")
-    try:
-        folder = ctx.web.get_folder_by_server_relative_url(folder_url)
-        files = folder.files.get().execute_query()
-        
-        mapa = {}
-        for f in files:
-            # Limpia el nombre: quita extensión, espacios y pasa a minúscula
-            nombre_base = str(os.path.splitext(f.name)[0]).strip().lower()
-            mapa[nombre_base] = f.serverRelativeUrl
+def obtener_mapa_fotos(ctx):
+    print("📸 Buscando carpeta de fotos en SharePoint...")
+    mapa = {}
+    rutas = [RUTA_ES, RUTA_EN]
+    
+    for folder_url in rutas:
+        try:
+            folder = ctx.web.get_folder_by_server_relative_url(folder_url)
+            files = folder.files.get().execute_query()
+            if len(files) > 0:
+                print(f"✅ ¡ÉXITO! Encontrada la carpeta con {len(files)} fotos.")
+                for f in files:
+                    nombre_base = str(os.path.splitext(f.name)[0]).strip().lower()
+                    mapa[nombre_base] = f.serverRelativeUrl
+                return mapa
+        except:
+            pass
             
-        print(f"✅ Se detectaron {len(mapa)} archivos de imagen en la carpeta.")
-        return mapa
-    except Exception as e:
-        print(f"⚠️ Error al acceder a la carpeta de fotos: {e}")
-        return {}
+    print("⚠️ ADVERTENCIA: No se pudo encontrar la carpeta de fotos. Revisa la ruta en SharePoint.")
+    return mapa
 
 def descargar_y_comprimir_foto(ctx, relative_url):
     try:
@@ -53,7 +58,7 @@ def descargar_y_comprimir_foto(ctx, relative_url):
         if len(file_content.getvalue()) > 0:
             with Image.open(file_content) as img:
                 if img.mode != "RGB": img = img.convert("RGB")
-                img.thumbnail((400, 400)) # Tamaño óptimo para carga rápida
+                img.thumbnail((400, 400))
                 buf = io.BytesIO()
                 img.save(buf, format='JPEG', quality=60)
                 return f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
@@ -69,55 +74,75 @@ def main():
         print("🚀 CONECTANDO A SHAREPOINT...")
         ctx = ClientContext(SITE_URL).with_credentials(UserCredential(USERNAME, PASSWORD))
         
-        # Primero mapeamos qué fotos existen realmente
-        mapa_fotos = obtener_mapa_fotos(ctx, FOTOS_FOLDER_URL)
+        mapa_fotos = obtener_mapa_fotos(ctx)
         
         print("📊 Descargando Base de Datos Excel...")
-        response = io.BytesIO()
-        ctx.web.get_file_by_server_relative_url(EXCEL_URL).download(response).execute_query()
+        try:
+            response = io.BytesIO()
+            ctx.web.get_file_by_server_relative_url(EXCEL_URL).download(response).execute_query()
+        except:
+            excel_en = EXCEL_URL.replace("Documentos compartidos", "Shared Documents")
+            response = io.BytesIO()
+            ctx.web.get_file_by_server_relative_url(excel_en).download(response).execute_query()
+            
         response.seek(0)
-        
         df = pd.read_excel(response, sheet_name="Gestión Inventario")
+        
+        # TRUCO ANTIMAGIA: Limpiar los nombres de las columnas del Excel
+        # Esto elimina saltos de línea extraños o espacios dobles
+        df.columns = [' '.join(str(c).split()).lower() for c in df.columns]
         df = df.fillna("") 
         
+        # Buscar los nombres exactos de las columnas clave
+        col_interno = next((c for c in df.columns if 'interno' in c and 'proyecto' in c), None)
+        col_foto = next((c for c in df.columns if 'fotografía' in c or 'fotografia' in c), None)
+        
+        if not col_interno or not col_foto:
+            print("❌ ERROR: No pude encontrar las columnas 'Código interno proyecto' o 'Código Fotografía asociada' en el Excel.")
+            print(f"Columnas detectadas: {list(df.columns)}")
+            return
+
         print(f"✅ Se leyeron {len(df)} filas del Excel. Iniciando cruce de datos...")
         
         db_json = {}
         fotos_exito = 0
 
         for index, row in df.iterrows():
-            cod_interno = str(row.get('Código\n interno \nproyecto', '')).strip()
+            cod_interno = str(row.get(col_interno, '')).strip()
             if not cod_interno or cod_interno == "nan": continue 
             
-            # Limpieza del código de foto del Excel para el match
-            val_excel_foto = str(row.get('Código Fotografía asociada', '')).strip().lower()
+            val_excel_foto = str(row.get(col_foto, '')).strip().lower()
             cod_foto = os.path.splitext(val_excel_foto)[0] if val_excel_foto != "nan" else ""
             
             img_b64 = None
-            # Si el código del Excel existe en nuestro mapa de la carpeta de SharePoint
             if cod_foto and cod_foto in mapa_fotos:
                 print(f"   ... Procesando imagen para: {cod_foto}", end='\r')
                 img_b64 = descargar_y_comprimir_foto(ctx, mapa_fotos[cod_foto])
                 if img_b64: fotos_exito += 1
             
+            # Buscar otras columnas con tolerancia a fallos
+            def get_val(keywords):
+                col = next((c for c in df.columns if any(k in c for k in keywords)), None)
+                return str(row.get(col, '')).replace('.0', '') if col else ''
+
             db_json[cod_interno] = {
                 "codigo_interno": cod_interno,
-                "codigo_sap": str(row.get('Código SAP', '')).replace('.0', ''),
-                "nombre": str(row.get('Nombre repuesto', '')),
-                "ubicacion_fisica": str(row.get('Ubicación física', '')),
-                "ubicacion_sap": str(row.get('Ubicacion SAP', '')),
-                "dimensiones": str(row.get('Dimensiones (Alto – Largo – Ancho) cm ', '')),
-                "peso": str(row.get('Peso total contenido (gr)', '')).replace('.0', ''),
-                "unidad": str(row.get('Unidad de contenido', '')),
-                "descripcion": str(row.get('Descripción técnica', '')),
-                "categoria": str(row.get('Categoría/Familia', '')),
-                "planta": str(row.get('Planta asociada', '')),
-                "criticidad": str(row.get('Criticidad', '')),
-                "stock": str(row.get('Repetido', '')).replace('.0', ''),
+                "codigo_sap": get_val(['sap']),
+                "nombre": get_val(['nombre repuesto']),
+                "ubicacion_fisica": get_val(['ubicación física', 'ubicacion fisica']),
+                "ubicacion_sap": get_val(['ubicacion sap', 'ubicación sap']),
+                "dimensiones": get_val(['dimensiones']),
+                "peso": get_val(['peso']),
+                "unidad": get_val(['unidad']),
+                "descripcion": get_val(['descripción técnica', 'descripcion tecnica']),
+                "categoria": get_val(['categoría', 'categoria']),
+                "planta": get_val(['planta']),
+                "criticidad": get_val(['criticidad']),
+                "stock": get_val(['repetido']),
                 "img_base64": img_b64
             }
             
-        print(f"\n✅ PROCESO COMPLETADO. Fotos vinculadas: {fotos_exito}")
+        print(f"\n✅ PROCESO COMPLETADO. Fotos vinculadas con éxito: {fotos_exito}")
         generar_html_inventario(db_json)
 
     except Exception as e: 
@@ -294,7 +319,6 @@ def generar_html_inventario(db_json):
 
     full_html = html_template.replace("__DB_JSON_DATA__", json.dumps(db_json))
     with open(OUTPUT_HTML, "w", encoding="utf-8") as f: f.write(full_html)
-    print(f"\n✅ DASHBOARD GENERADO CON ÉXITO: {OUTPUT_HTML}")
 
 if __name__ == "__main__":
     main()
