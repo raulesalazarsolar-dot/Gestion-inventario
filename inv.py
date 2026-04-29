@@ -1,23 +1,16 @@
 import io
-import base64
 import json
 import os
 import pandas as pd
-from urllib.parse import unquote
-from PIL import Image
 
 # Librerías de SharePoint
 from office365.sharepoint.client_context import ClientContext
 from office365.runtime.auth.user_credential import UserCredential
 
 # ==========================================
-# 1. CONFIGURACIÓN (CON CREDENCIALES)
+# 1. CONFIGURACIÓN
 # ==========================================
 SITE_URL = "https://teams.wal-mart.com/sites/MejoradedesempeoprocesosclaveP5-Carnes"
-
-# Rutas de búsqueda
-RUTA_ES = "/sites/MejoradedesempeoprocesosclaveP5-Carnes/Documentos compartidos/Asset Strategy/Levantamiento Repuestos Mantenimiento/Levantamiento de Repuestos Bodega Mantenimiento/Fotos Repuestos"
-RUTA_EN = "/sites/MejoradedesempeoprocesosclaveP5-Carnes/Shared Documents/Asset Strategy/Levantamiento Repuestos Mantenimiento/Levantamiento de Repuestos Bodega Mantenimiento/Fotos Repuestos"
 EXCEL_URL = "/sites/MejoradedesempeoprocesosclaveP5-Carnes/Documentos compartidos/Asset Strategy/Levantamiento Repuestos Mantenimiento/Levantamiento de Repuestos Bodega Mantenimiento/Gestión de Inventario (solo datos) y ficha.xlsm"
 
 USERNAME = "r0r0noi@cl.wal-mart.com"
@@ -26,55 +19,12 @@ PASSWORD = "fiXed.sPout+8"
 OUTPUT_HTML = "index.html"
 
 # ==========================================
-# 2. FUNCIONES DE IMÁGENES
-# ==========================================
-def obtener_mapa_fotos(ctx):
-    print("📸 Buscando carpeta de fotos en SharePoint...")
-    mapa = {}
-    rutas = [RUTA_ES, RUTA_EN]
-    
-    for folder_url in rutas:
-        try:
-            folder = ctx.web.get_folder_by_server_relative_url(folder_url)
-            files = folder.files.get().execute_query()
-            if len(files) > 0:
-                print(f"✅ ¡ÉXITO! Encontrada la carpeta con {len(files)} fotos.")
-                for f in files:
-                    nombre_base = str(os.path.splitext(f.name)[0]).strip().lower()
-                    mapa[nombre_base] = f.serverRelativeUrl
-                return mapa
-        except:
-            pass
-            
-    print("⚠️ ADVERTENCIA: No se pudo encontrar la carpeta de fotos. Revisa la ruta en SharePoint.")
-    return mapa
-
-def descargar_y_comprimir_foto(ctx, relative_url):
-    try:
-        file_content = io.BytesIO()
-        ctx.web.get_file_by_server_relative_url(relative_url).download(file_content).execute_query()
-        file_content.seek(0)
-        
-        if len(file_content.getvalue()) > 0:
-            with Image.open(file_content) as img:
-                if img.mode != "RGB": img = img.convert("RGB")
-                img.thumbnail((400, 400))
-                buf = io.BytesIO()
-                img.save(buf, format='JPEG', quality=60)
-                return f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
-    except Exception:
-        pass
-    return None
-
-# ==========================================
-# 3. EXTRACCIÓN Y PROCESAMIENTO
+# 2. EXTRACCIÓN DEL EXCEL
 # ==========================================
 def main():
     try:
-        print("🚀 CONECTANDO A SHAREPOINT...")
+        print("🚀 CONECTANDO A SHAREPOINT (Solo para leer Excel)...")
         ctx = ClientContext(SITE_URL).with_credentials(UserCredential(USERNAME, PASSWORD))
-        
-        mapa_fotos = obtener_mapa_fotos(ctx)
         
         print("📊 Descargando Base de Datos Excel...")
         try:
@@ -88,39 +38,27 @@ def main():
         response.seek(0)
         df = pd.read_excel(response, sheet_name="Gestión Inventario")
         
-        # TRUCO ANTIMAGIA: Limpiar los nombres de las columnas del Excel
-        # Esto elimina saltos de línea extraños o espacios dobles
+        # Limpiar nombres de columnas
         df.columns = [' '.join(str(c).split()).lower() for c in df.columns]
         df = df.fillna("") 
         
-        # Buscar los nombres exactos de las columnas clave
         col_interno = next((c for c in df.columns if 'interno' in c and 'proyecto' in c), None)
         col_foto = next((c for c in df.columns if 'fotografía' in c or 'fotografia' in c), None)
         
-        if not col_interno or not col_foto:
-            print("❌ ERROR: No pude encontrar las columnas 'Código interno proyecto' o 'Código Fotografía asociada' en el Excel.")
-            print(f"Columnas detectadas: {list(df.columns)}")
-            return
-
-        print(f"✅ Se leyeron {len(df)} filas del Excel. Iniciando cruce de datos...")
+        print(f"✅ Se leyeron {len(df)} filas del Excel. Construyendo catálogo...")
         
         db_json = {}
-        fotos_exito = 0
 
         for index, row in df.iterrows():
             cod_interno = str(row.get(col_interno, '')).strip()
             if not cod_interno or cod_interno == "nan": continue 
             
-            val_excel_foto = str(row.get(col_foto, '')).strip().lower()
-            cod_foto = os.path.splitext(val_excel_foto)[0] if val_excel_foto != "nan" else ""
+            # Limpiamos el código de la foto y armamos la ruta local hacia la carpeta de GitHub
+            val_excel_foto = str(row.get(col_foto, '')).strip().upper()
+            cod_foto = os.path.splitext(val_excel_foto)[0] if val_excel_foto != "NAN" else ""
             
-            img_b64 = None
-            if cod_foto and cod_foto in mapa_fotos:
-                print(f"   ... Procesando imagen para: {cod_foto}", end='\r')
-                img_b64 = descargar_y_comprimir_foto(ctx, mapa_fotos[cod_foto])
-                if img_b64: fotos_exito += 1
+            img_ruta = f"fotos/{cod_foto}.jpg" if cod_foto else None
             
-            # Buscar otras columnas con tolerancia a fallos
             def get_val(keywords):
                 col = next((c for c in df.columns if any(k in c for k in keywords)), None)
                 return str(row.get(col, '')).replace('.0', '') if col else ''
@@ -139,19 +77,17 @@ def main():
                 "planta": get_val(['planta']),
                 "criticidad": get_val(['criticidad']),
                 "stock": get_val(['repetido']),
-                "img_base64": img_b64
+                "img_ruta": img_ruta
             }
             
-        print(f"\n✅ PROCESO COMPLETADO. Fotos vinculadas con éxito: {fotos_exito}")
+        print("\n✅ PROCESO COMPLETADO. Generando HTML...")
         generar_html_inventario(db_json)
 
     except Exception as e: 
         print(f"\n❌ ERROR FATAL: {e}")
-        import traceback
-        traceback.print_exc()
 
 # ==========================================
-# 4. GENERADOR HTML (CATÁLOGO VISUAL)
+# 3. GENERADOR HTML (RUTAS LOCALES)
 # ==========================================
 def generar_html_inventario(db_json):
     html_template = """<!DOCTYPE html>
@@ -179,9 +115,9 @@ def generar_html_inventario(db_json):
         .grid-container { padding: 25px; overflow-y: auto; flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; align-content: start; }
         .card { background: white; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; cursor: pointer; transition: 0.2s; display: flex; flex-direction: column; }
         .card:hover { transform: translateY(-4px); box-shadow: 0 12px 20px -5px rgba(0,0,0,0.1); border-color: var(--accent); }
-        .card-img-wrapper { height: 180px; background: #f1f5f9; display: flex; align-items: center; justify-content: center; }
+        .card-img-wrapper { height: 180px; background: #f1f5f9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
         .card-img { width: 100%; height: 100%; object-fit: contain; padding: 10px; }
-        .no-img { color: #94a3b8; font-style: italic; font-size: 0.85rem; }
+        .no-img { color: #94a3b8; font-style: italic; font-size: 0.85rem; text-align: center;}
         .card-body { padding: 15px; display: flex; flex-direction: column; flex: 1; }
         .c-tag { background: #eff6ff; color: #0284c7; padding: 3px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 800; align-self: flex-start; margin-bottom: 10px; }
         .c-title { font-weight: 700; font-size: 0.95rem; color: var(--primary); margin: 0 0 12px 0; line-height: 1.3; }
@@ -189,7 +125,7 @@ def generar_html_inventario(db_json):
         
         .modal { display: none; position: fixed; top:0; left:0; width: 100%; height: 100%; background: rgba(15,23,42,0.85); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); }
         .modal-content { background: white; width: 95%; max-width: 950px; border-radius: 16px; display: flex; overflow: hidden; max-height: 85vh; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); }
-        .m-img-sec { width: 45%; background: #f8fafc; display: flex; align-items: center; justify-content: center; border-right: 1px solid var(--border); }
+        .m-img-sec { width: 45%; background: #f8fafc; display: flex; align-items: center; justify-content: center; border-right: 1px solid var(--border); overflow: hidden; }
         .m-img-sec img { max-width: 90%; max-height: 90%; object-fit: contain; }
         .m-data-sec { width: 55%; padding: 35px; overflow-y: auto; position: relative; }
         .close-btn { position: absolute; top: 20px; right: 25px; font-size: 2rem; cursor: pointer; border: none; background: none; color: #94a3b8; }
@@ -264,8 +200,10 @@ def generar_html_inventario(db_json):
             container.innerHTML = '';
 
             data.forEach(d => {
-                const imgHtml = d.img_base64 
-                    ? `<img src="${d.img_base64}" class="card-img">` 
+                // Truco para las fotos que faltan subir
+                const imgErrorHandle = "this.onerror=null; this.outerHTML='<div class=\\'no-img\\'>📷 Pendiente de subir</div>';";
+                const imgHtml = d.img_ruta 
+                    ? `<img src="${d.img_ruta}" class="card-img" loading="lazy" onerror="${imgErrorHandle}">` 
                     : `<div class="no-img">📷 Sin fotografía</div>`;
 
                 const card = document.createElement('div');
@@ -287,9 +225,11 @@ def generar_html_inventario(db_json):
         function openModal(d) {
             const modal = document.getElementById('detail_modal');
             const body = document.getElementById('modal_body');
-            const imgHtml = d.img_base64 
-                ? `<img src="${d.img_base64}">` 
-                : `<div style="color:#94a3b8; font-style:italic; font-size:1.2rem;">📷 Fotografía no disponible</div>`;
+            
+            const imgErrorHandle = "this.onerror=null; this.outerHTML='<div style=\\'color:#94a3b8; font-style:italic; font-size:1.2rem; text-align:center;\\'>📷 Pendiente de subir</div>';";
+            const imgHtml = d.img_ruta 
+                ? `<img src="${d.img_ruta}" onerror="${imgErrorHandle}">` 
+                : `<div style="color:#94a3b8; font-style:italic; font-size:1.2rem; text-align:center;">📷 Fotografía no disponible</div>`;
 
             body.innerHTML = `
                 <div class="m-img-sec">${imgHtml}</div>
