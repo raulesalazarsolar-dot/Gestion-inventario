@@ -64,6 +64,9 @@ def main():
                 res = str(row.get(col, '')).strip()
                 return res.replace('.0', '') if col else ''
 
+            # Extracción explícita de la Columna Y (Índice 24 en Pandas donde A=0)
+            stock_val = str(row.iloc[24]).strip().replace('.0', '') if len(row) > 24 else ""
+
             db_json[cod_interno] = {
                 "id": cod_interno,
                 "sap": get_val(['sap']),
@@ -87,7 +90,7 @@ def main():
                 "compatibilidad": get_val(['compatibilidad']),
                 "vida_util": get_val(['vida útil', 'vida util']),
                 "almacenamiento": get_val(['condiciones de almacenamiento']),
-                "stock": get_val(['repetido']),
+                "stock": stock_val, # Asignado desde la columna Y directamente
                 "img": img_ruta
             }
             
