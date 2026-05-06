@@ -9,16 +9,19 @@ on:
     - cron: '0 8 * * *'
   workflow_dispatch: # Te permite ejecutarlo manualmente con un botón
 
+permissions:
+  contents: write  # <-- ESTO ES CLAVE: Permite al bot guardar el index.html en tu repo
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout del código
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4  # <-- ACTUALIZADO para quitar la advertencia
 
       - name: Configurar Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5  # <-- ACTUALIZADO para quitar la advertencia
         with:
           python-version: '3.10'
 
